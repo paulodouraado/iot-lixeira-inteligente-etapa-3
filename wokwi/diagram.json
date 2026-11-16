@@ -39,13 +39,13 @@
       "top": -121.4,
       "left": -0.85,
       "rotate": 270,
-      "attrs": { "value": "2000" }
+      "attrs": { "value": "2200" }
     }
   ],
   "connections": [
     [ "esp:TX", "$serialMonitor:RX", "", [] ],
     [ "esp:RX", "$serialMonitor:TX", "", [] ],
-    [ "esp:3V3", "bb1:bp.1", "red", [ "h-19.05", "v-48", "h9.6" ] ],
+    [ "esp:5V", "bb1:bp.1", "red", [ "h-28.65", "v-182.4", "h9.6" ] ],
     [ "bb1:24t.e", "bb1:bp.20", "red", [ "v0" ] ],
     [ "esp:5", "bb1:25t.e", "gold", [ "h0" ] ],
     [ "bb1:9t.e", "bb1:bn.7", "black", [ "v0" ] ],

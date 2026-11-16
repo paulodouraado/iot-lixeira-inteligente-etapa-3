@@ -23,7 +23,7 @@ Como o repositório original não declara licença, todos os direitos pertencem 
 | Pedido | Autorização para usar, modificar e publicar um fork do projeto de IoT, mantendo o crédito à sua autoria |
 | Resposta | "Autorizo !" |
 
-![Registro da autorização da autora via WhatsApp](mensagem-de-autorização.png)
+![Registro da autorização da autora via WhatsApp](imagens/mensagem-de-autorização.png)
 
 ---
 
@@ -246,6 +246,12 @@ A evidência será o Monitor Serial e o gráfico do ThingSpeak lado a lado, com 
 | G                | GPIO 26                        |
 | B                | GPIO 27                        |
 | Comum (-)        | GND                            |
+
+**Esquema de ligação (simulação no Wokwi):**
+
+![Esquema de ligação do projeto no Wokwi](imagens/esquema-de-ligacao.png)
+
+O arquivo do circuito está em [`wokwi/diagram.json`](wokwi/diagram.json) e pode ser importado no Wokwi.
 
 ### 3. Instalar Dependências
 

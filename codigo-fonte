@@ -1,38 +1,68 @@
+// ====================================================================
+// LIXEIRA INTELIGENTE IoT - ETAPA 3 (VERSÃO MELHORADA)
+// ESP32 + HC-SR04 + LED RGB (cátodo comum) + ThingSpeak (HTTP)
+//
+// Projeto original: Deusiane Pimenta Rocha (2026.1)
+// Melhorias: Paulo Victor Dourado Ribeiro (2026.2)
+//
+// MELHORIAS EM RELAÇÃO AO ORIGINAL (marcadas com [MELHORIA]):
+//   1. pulseIn com timeout (30 ms) e descarte de leituras 0 ou fora
+//      de 2-400 cm.
+//   2. Erro de sensor: LED amarelo piscando e o nível NÃO é enviado
+//      (antes, falta de eco virava "100 % cheia").
+//   3. Wi-Fi sem laço bloqueante e reconexão automática a cada 10 s.
+//   4. LED e medição funcionam offline; o envio só ocorre com Wi-Fi.
+//   5. delay(20000) trocado por controle com millis().
+//   6. Credenciais fora do código (secrets.h, ignorado pelo Git).
+// ====================================================================
+
 #include <WiFi.h>
 #include <ThingSpeak.h>
-
-// ========================
-// WIFI
-// ========================
-const char* ssid = "SEU_WIFI";
-const char* password = "SUA_SENHA";
+#include "secrets.h"   // [MELHORIA] SSID, senha, Channel ID e Write API Key
 
 WiFiClient client;
 
 // ========================
-// THINGSPEAK
-// ========================
-unsigned long channelID = SEU_CANAL;
-const char* writeAPIKey = "SUA_CHAVE";
-
-// ========================
-// HC-SR04
+// PINOS
 // ========================
 #define TRIG 5
 #define ECHO 18
 
-// ========================
-// LED RGB
-// ========================
 #define RED_PIN   25
 #define GREEN_PIN 26
 #define BLUE_PIN  27
 
-// Altura da lixeira (cm)
-const float ALTURA_LIXEIRA = 30.0;
+// ========================
+// PARÂMETROS
+// ========================
+const float ALTURA_LIXEIRA = 30.0;  // altura útil da lixeira (cm)
+
+// --- Sensor ---
+const unsigned long TIMEOUT_ECHO_US = 30000;  // ~5 m de alcance
+const float DIST_MIN_CM = 2.0;                // faixa do HC-SR04
+const float DIST_MAX_CM = 400.0;
+
+// --- Tempos (todos com millis(), sem delay longo) ---
+const unsigned long INTERVALO_LEITURA_MS   = 1000;   // medir e atualizar o LED
+const unsigned long INTERVALO_ENVIO_MS     = 20000;  // ThingSpeak exige >= 15 s
+const unsigned long INTERVALO_RECONEXAO_MS = 10000;  // tentativa de reconexão Wi-Fi
+const unsigned long PERIODO_PISCA_MS       = 300;    // pisca do LED de erro
 
 // ========================
-// FUNÇÃO LED RGB
+// ESTADO DO SISTEMA
+// ========================
+float ultimoNivel = 0;
+bool  sensorOk    = true;
+bool  temLeitura  = false;   // já houve ao menos uma medição
+
+unsigned long tLeitura = 0;
+unsigned long tEnvio   = 0;
+unsigned long tWiFi    = 0;
+
+bool wifiConectado = false;
+
+// ========================
+// LED RGB
 // ========================
 void setColor(bool red, bool green, bool blue) {
   digitalWrite(RED_PIN, red);
@@ -40,125 +70,179 @@ void setColor(bool red, bool green, bool blue) {
   digitalWrite(BLUE_PIN, blue);
 }
 
-void setup() {
-
-  Serial.begin(115200);
-
-  // Sensor Ultrassônico
-  pinMode(TRIG, OUTPUT);
-  pinMode(ECHO, INPUT);
-
-  // LED RGB
-  pinMode(RED_PIN, OUTPUT);
-  pinMode(GREEN_PIN, OUTPUT);
-  pinMode(BLUE_PIN, OUTPUT);
-
-  // Apaga LED inicialmente
-  setColor(LOW, LOW, LOW);
-
-  // Conecta ao Wi-Fi
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.println("Conectando WiFi...");
+// [MELHORIA] Estado do LED decidido em um só lugar.
+// Roda a cada volta do loop, para o pisca de erro funcionar sem delay.
+void atualizarLed() {
+  if (!temLeitura) {
+    setColor(LOW, LOW, LOW);
+    return;
   }
 
-  Serial.println("WiFi conectado!");
+  if (!sensorOk) {
+    // AMARELO piscando (vermelho + verde) = erro de sensor
+    bool ligado = ((millis() / PERIODO_PISCA_MS) % 2) == 0;
+    setColor(ligado, ligado, LOW);
+    return;
+  }
 
-  ThingSpeak.begin(client);
+  if (ultimoNivel < 50) {
+    setColor(LOW, HIGH, LOW);      // VERDE = vazia
+  } else if (ultimoNivel < 80) {
+    setColor(LOW, LOW, HIGH);      // AZUL = metade
+  } else {
+    setColor(HIGH, LOW, LOW);      // VERMELHO = cheia
+  }
 }
 
-void loop() {
+// ========================
+// SENSOR HC-SR04
+// ========================
 
-  long duracao;
-  float distancia;
-  float nivel;
-
-  // ========================
-  // LEITURA HC-SR04
-  // ========================
-
+// Uma leitura. Retorna a distância em cm ou -1 se for inválida.
+float lerDistanciaUmaVez() {
   digitalWrite(TRIG, LOW);
   delayMicroseconds(2);
-
   digitalWrite(TRIG, HIGH);
   delayMicroseconds(10);
-
   digitalWrite(TRIG, LOW);
 
-  duracao = pulseIn(ECHO, HIGH);
+  // [MELHORIA] timeout: sem eco, pulseIn devolve 0 em vez de enganar
+  long duracao = pulseIn(ECHO, HIGH, TIMEOUT_ECHO_US);
+  if (duracao == 0) return -1;                 // sem eco: leitura inválida
 
-  distancia = duracao * 0.034 / 2.0;
+  float distancia = duracao * 0.034 / 2.0;
 
-  // ========================
-  // CÁLCULO DO NÍVEL
-  // ========================
+  // [MELHORIA] descarta o que está fora da faixa do sensor
+  if (distancia < DIST_MIN_CM || distancia > DIST_MAX_CM) return -1;
 
-  nivel =
-    ((ALTURA_LIXEIRA - distancia)
-    / ALTURA_LIXEIRA) * 100.0;
+  return distancia;
+}
 
-  if (nivel < 0) nivel = 0;
-  if (nivel > 100) nivel = 100;
-
-  // ========================
-  // CONTROLE DO LED RGB
-  // ========================
-
-  if (nivel < 50) {
-
-    // VERDE = VAZIA
-    setColor(LOW, HIGH, LOW);
-
-  } else if (nivel < 80) {
-
-    // AZUL = METADE
-    setColor(LOW, LOW, HIGH);
-
-  } else {
-
-    // VERMELHO = CHEIA
-    setColor(HIGH, LOW, LOW);
-
-  }
-
-  // ========================
-  // MONITOR SERIAL
-  // ========================
+void atualizarLeitura() {
+  float distancia = lerDistanciaUmaVez();
+  temLeitura = true;
 
   Serial.println("========================");
+
+  if (distancia < 0) {
+    sensorOk = false;
+    Serial.println("ERRO DE SENSOR: leitura invalida (sem eco ou fora de 2-400 cm).");
+    Serial.println("O nivel nao sera enviado.");
+    return;
+  }
+
+  sensorOk = true;
+
+  float nivel = ((ALTURA_LIXEIRA - distancia) / ALTURA_LIXEIRA) * 100.0;
+  if (nivel < 0)   nivel = 0;
+  if (nivel > 100) nivel = 100;
+  ultimoNivel = nivel;
+
   Serial.print("Distancia: ");
   Serial.print(distancia);
   Serial.println(" cm");
-
   Serial.print("Nivel da Lixeira: ");
   Serial.print(nivel);
   Serial.println(" %");
+}
 
-  // ========================
-  // ENVIO THINGSPEAK
-  // ========================
+// ========================
+// WI-FI (sem bloquear)
+// ========================
 
-  ThingSpeak.setField(1, nivel);
+// [MELHORIA] Chamada a cada volta do loop: detecta queda/retorno
+// e tenta reconectar de tempos em tempos, sem travar o programa.
+void verificarWiFi() {
+  bool conectado = (WiFi.status() == WL_CONNECTED);
 
-  int resposta =
-    ThingSpeak.writeFields(
-      channelID,
-      writeAPIKey
-    );
-
-  if (resposta == 200) {
-
-    Serial.println("Dados enviados ao ThingSpeak!");
-
-  } else {
-
-    Serial.print("Erro ThingSpeak: ");
-    Serial.println(resposta);
-
+  if (conectado && !wifiConectado) {
+    Serial.print("[WiFi] Conectado. IP: ");
+    Serial.println(WiFi.localIP());
   }
 
-  // ThingSpeak exige intervalo mínimo de 15 s
-  delay(20000);
+  if (!conectado && wifiConectado) {
+    Serial.println("[WiFi] Conexao perdida. Medicao e LED seguem funcionando.");
+  }
+
+  wifiConectado = conectado;
+
+  if (!conectado && (millis() - tWiFi >= INTERVALO_RECONEXAO_MS)) {
+    tWiFi = millis();
+    Serial.println("[WiFi] Tentando (re)conectar...");
+    WiFi.disconnect();
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+}
+
+// ========================
+// ENVIO THINGSPEAK (HTTP)
+// ========================
+void enviarThingSpeak() {
+  tEnvio = millis();
+
+  // [MELHORIA] Leitura inválida nunca vira dado no dashboard
+  if (!sensorOk) {
+    Serial.println("[ThingSpeak] Leitura invalida: envio descartado.");
+    return;
+  }
+
+  ThingSpeak.setField(1, ultimoNivel);
+
+  int resposta = ThingSpeak.writeFields(THINGSPEAK_CHANNEL_ID, THINGSPEAK_WRITE_KEY);
+
+  if (resposta == 200) {
+    Serial.println("[ThingSpeak] Dados enviados!");
+  } else {
+    Serial.print("[ThingSpeak] Erro ");
+    Serial.print(resposta);
+    Serial.println(" - nova tentativa no proximo ciclo.");
+  }
+}
+
+// ========================
+// SETUP
+// ========================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+  setColor(LOW, LOW, LOW);
+
+  // [MELHORIA] Não espera o Wi-Fi: o sistema já funciona localmente.
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  tWiFi = millis();
+
+  ThingSpeak.begin(client);
+
+  Serial.println("Lixeira Inteligente - versao melhorada iniciada.");
+
+  atualizarLeitura();
+  tLeitura = millis();
+}
+
+// ========================
+// LOOP
+// ========================
+void loop() {
+  verificarWiFi();
+
+  if (millis() - tLeitura >= INTERVALO_LEITURA_MS) {
+    tLeitura = millis();
+    atualizarLeitura();
+    // (o LED é atualizado logo abaixo, a cada volta do loop)
+  }
+
+  // [MELHORIA] Envio só com Wi-Fi e respeitando o intervalo do ThingSpeak.
+  // Substitui o delay(20000), que congelava o LED entre os envios.
+  if (wifiConectado && temLeitura && millis() - tEnvio >= INTERVALO_ENVIO_MS) {
+    enviarThingSpeak();
+  }
+
+  atualizarLed();
 }
